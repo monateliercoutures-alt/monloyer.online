@@ -19,7 +19,8 @@ import { RentStatusBadge } from '@/components/ui/status-badge';
 import { EmptyState } from '@/components/ui/empty-state';
 import { OnboardingChecklist } from '@/components/onboarding-checklist';
 import { getDashboard } from '@/server/services/reports.service';
-import { getTenantContext } from '@/server/session';
+import { getTenantContext, requireUser } from '@/server/session';
+import { redirect } from 'next/navigation';
 import { prisma } from '@/server/db';
 import { formatDate, formatFCFA, formatMonthYear, formatPercent } from '@/lib/format';
 import { requirePermission } from '@/server/session';
@@ -28,6 +29,10 @@ export const metadata: Metadata = { title: 'Tableau de bord' };
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
+  const currentUser = await requireUser();
+  if (currentUser.role === 'LOCATAIRE' || currentUser.role === 'PROPRIETAIRE') {
+    redirect('/mon-espace');
+  }
   const user = await requirePermission('properties:read');
   const { organizationId } = await getTenantContext();
   const data = await getDashboard(organizationId);

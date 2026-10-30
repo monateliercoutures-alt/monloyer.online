@@ -3,13 +3,13 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { RegisterForm } from '@/components/auth/register-form';
-import { getCurrentUser } from '@/server/session';
+import { getCurrentUser, homePathForRole } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Créer un compte' };
 
 export default async function RegisterPage() {
   const user = await getCurrentUser();
-  if (user) redirect('/tableau-de-bord');
+  if (user) redirect(homePathForRole(user.role));
 
   return (
     <Card>

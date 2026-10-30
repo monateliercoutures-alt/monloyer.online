@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 import { createHash, randomBytes } from 'node:crypto';
 import type { Organization, Role } from '@prisma/client';
 import { prisma } from '@/server/db';
-import { can, type Permission } from '@/lib/permissions';
+import { can, isStaff, type Permission } from '@/lib/permissions';
 
 export const SESSION_COOKIE = 'ml_session';
 const SESSION_DURATION_DAYS = 30;
@@ -44,10 +44,19 @@ export async function createSession(userId: string): Promise<string> {
   });
 
   const cookieStore = await cookies();
+  const requestHeaders = await headers();
+  const forwardedProto = requestHeaders.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const isHttps = forwardedProto === 'https';
+  // En préview intégrée (iframe d'un autre domaine), le cookie doit être
+  // SameSite=None + Partitioned pour être transmis ; sinon on garde Lax (CSRF).
+  const isCrossSite = requestHeaders.get('sec-fetch-site') === 'cross-site';
+
   cookieStore.set(SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    // `Secure` uniquement si la requête arrive réellement en HTTPS
+    secure: isHttps,
+    sameSite: isCrossSite && isHttps ? 'none' : 'lax',
+    partitioned: isCrossSite && isHttps,
     path: '/',
     expires: expiresAt,
   });
@@ -105,10 +114,23 @@ export async function requireUser(): Promise<SessionUser> {
   return user;
 }
 
+/**
+ * Page d'accueil d'un utilisateur : les comptes propriétaire/locataire sont
+ * dirigés vers leur espace personnel, les collaborateurs vers le tableau de bord.
+ */
+export function homePathForRole(role: Role): string {
+  return role === 'LOCATAIRE' || role === 'PROPRIETAIRE' ? '/mon-espace' : '/tableau-de-bord';
+}
+
 /** Garde-fou + vérification de permission côté serveur. */
 export async function requirePermission(permission: Permission): Promise<SessionUser> {
   const user = await requireUser();
-  if (!can(user.role, permission)) redirect('/acces-refuse');
+  if (!can(user.role, permission)) {
+    // Un propriétaire ou un locataire n'a rien à faire sur les pages agence :
+    // on le renvoie vers son espace plutôt que sur une page d'erreur.
+    if (!isStaff(user.role)) redirect('/mon-espace');
+    redirect('/acces-refuse');
+  }
   return user;
 }
 
