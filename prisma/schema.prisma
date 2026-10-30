@@ -1,0 +1,632 @@
+// ---------------------------------------------------------------------------
+//  monloyer.online — Schéma de données (PostgreSQL / Neon)
+//  Multi-tenant : toutes les entités métier portent un organizationId.
+//  Les montants sont stockés en entiers (FCFA : pas de sous-unité monétaire).
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider        = "prisma-client-js"
+  // Le "query compiler" (WASM) évite d'embarquer un binaire Rust :
+  // déploiement Vercel plus léger et compatible driver adapters.
+  previewFeatures = ["driverAdapters", "queryCompiler"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------- ÉNUMÉRATIONS ------------------------------
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN_AGENCE
+  AGENT
+  PROPRIETAIRE
+  LOCATAIRE
+  COMPTABLE
+}
+
+enum PropertyType {
+  APPARTEMENT
+  VILLA
+  STUDIO
+  CHAMBRE
+  BOUTIQUE
+  BUREAU
+  IMMEUBLE
+}
+
+enum PropertyStatus {
+  LIBRE
+  OCCUPE
+  EN_TRAVAUX
+}
+
+enum UnitStatus {
+  LIBRE
+  OCCUPE
+  EN_TRAVAUX
+}
+
+enum LeaseStatus {
+  BROUILLON
+  ACTIF
+  RESILIE
+  EXPIRE
+}
+
+enum RentPeriodicity {
+  MENSUEL
+  TRIMESTRIEL
+  SEMESTRIEL
+  ANNUEL
+}
+
+enum RentStatus {
+  A_VENIR
+  PARTIEL
+  PAYE
+  EN_RETARD
+}
+
+enum PaymentMethod {
+  ESPECES
+  VIREMENT
+  MOBILE_MONEY
+  CHEQUE
+  AUTRE
+}
+
+enum PaymentStatus {
+  VALIDE
+  ANNULE
+}
+
+enum ReminderChannel {
+  WHATSAPP
+  SMS
+  EMAIL
+}
+
+enum ReminderStatus {
+  A_ENVOYER
+  ENVOYE
+  ECHEC
+  ANNULE
+}
+
+enum ExpenseCategory {
+  TRAVAUX
+  REPARATION
+  EAU
+  ELECTRICITE
+  ASSURANCE
+  IMPOT
+  HONORAIRES
+  AUTRE
+}
+
+enum DocumentType {
+  PIECE_IDENTITE
+  CONTRAT
+  QUITTANCE
+  JUSTIFICATIF_BAIL
+  AUTRE
+}
+
+enum InvitationStatus {
+  EN_ATTENTE
+  ACCEPTEE
+  EXPIREE
+  ANNULEE
+}
+
+enum MandateType {
+  GESTION_LOCATIVE
+  MANDAT_SIMPLE
+}
+
+enum CommissionType {
+  POURCENTAGE
+  MONTANT_FIXE
+}
+
+// ------------------------------ ORGANISATION -------------------------------
+
+/// Agence, résidence ou propriétaire individuel : c'est le tenant racine.
+model Organization {
+  id                 String   @id @default(cuid())
+  name               String
+  slug               String   @unique
+  email              String?
+  phone              String?
+  address            String?
+  city               String   @default("Abidjan")
+  country            String   @default("Côte d'Ivoire")
+  logoUrl            String?
+  primaryColor       String   @default("#0f766e")
+  currency           String   @default("XOF")
+  timezone           String   @default("Africa/Abidjan")
+  /// Taux de commission par défaut (%) appliqué aux propriétaires sans mandat spécifique
+  commissionRate     Float    @default(10)
+  /// Pénalité de retard en % du loyer, par mois de retard
+  penaltyRatePercent Float    @default(5)
+  /// Nombre de jours de tolérance avant application de la pénalité
+  penaltyGraceDays   Int      @default(5)
+  /// Décalages (en jours) des relances automatiques : J-3, J0, J+3, J+7, J+15
+  reminderOffsets    Int[]    @default([-3, 0, 3, 7, 15])
+  reminderChannels   String[] @default(["WHATSAPP", "SMS"])
+  receiptPrefix      String   @default("QUI")
+  receiptCounter     Int      @default(0)
+  /// Modèle de message de relance (variables {nom}, {montant}, {date}, {logement}, {agence})
+  reminderTemplate   String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  users         User[]
+  owners        Owner[]
+  properties    Property[]
+  units         Unit[]
+  tenants       Tenant[]
+  leases        Lease[]
+  rentSchedules RentSchedule[]
+  payments      Payment[]
+  receipts      Receipt[]
+  reminders     Reminder[]
+  expenses      Expense[]
+  documents     Document[]
+  activities    ActivityLog[]
+  invitations   Invitation[]
+  phoneOtps     PhoneOtp[]
+
+  @@index([slug])
+}
+
+// ------------------------------ UTILISATEURS -------------------------------
+
+model User {
+  id                    String    @id @default(cuid())
+  organizationId        String?
+  role                  Role      @default(AGENT)
+  firstName             String
+  lastName              String
+  email                 String?   @unique
+  phone                 String?   @unique
+  passwordHash          String?
+  avatarUrl             String?
+  isActive              Boolean   @default(true)
+  lastLoginAt           DateTime?
+  onboardingCompletedAt DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  sessions        Session[]
+  ownerProfile    Owner?
+  tenantProfile   Tenant?
+  invitationsSent Invitation[]    @relation("InvitationInviter")
+  activities      ActivityLog[]
+  paymentsMade    Payment[]       @relation("PaymentRecorder")
+  receiptsIssued  Receipt[]
+  remindersSent   Reminder[]
+
+  @@index([organizationId])
+}
+
+/// Session sécurisée : seul le hash du jeton est stocké en base.
+model Session {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Code OTP de connexion par téléphone (hash uniquement, usage unique).
+model PhoneOtp {
+  id             String    @id @default(cuid())
+  organizationId String?
+  phone          String
+  codeHash       String
+  expiresAt      DateTime
+  consumedAt     DateTime?
+  attempts       Int       @default(0)
+  createdAt      DateTime  @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([phone])
+}
+
+/// Invitation d'un collaborateur, propriétaire ou locataire par lien.
+model Invitation {
+  id             String           @id @default(cuid())
+  organizationId String
+  email          String?
+  phone          String?
+  firstName      String?
+  lastName       String?
+  role           Role
+  token          String           @unique
+  status         InvitationStatus @default(EN_ATTENTE)
+  invitedById    String?
+  ownerId        String?
+  tenantId       String?
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime         @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invitedBy    User?        @relation("InvitationInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+}
+
+// ------------------------------- PROPRIÉTAIRES -----------------------------
+
+model Owner {
+  id              String         @id @default(cuid())
+  organizationId  String
+  userId          String?        @unique
+  firstName       String
+  lastName        String
+  phone           String
+  email           String?
+  idNumber        String?
+  address         String?
+  mandateType     MandateType    @default(GESTION_LOCATIVE)
+  mandateStart    DateTime?
+  mandateEnd      DateTime?
+  commissionType  CommissionType @default(POURCENTAGE)
+  /// Pourcentage (ex. 10) ou montant fixe en FCFA selon commissionType
+  commissionValue Float?
+  paymentMethod   String?
+  paymentDetails  String?
+  notes           String?
+  isActive        Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  properties Property[]
+  leases     Lease[]
+  expenses   Expense[]
+  documents  Document[]
+
+  @@index([organizationId])
+}
+
+// --------------------------------- BIENS -----------------------------------
+
+model Property {
+  id             String         @id @default(cuid())
+  organizationId String
+  ownerId        String
+  reference      String
+  name           String?
+  type           PropertyType
+  address        String
+  district       String
+  city           String         @default("Abidjan")
+  status         PropertyStatus @default(LIBRE)
+  description    String?
+  photos         String[]       @default([])
+  /// Loyer de base indicatif du bien (les logements peuvent affiner)
+  rentAmount     Int            @default(0)
+  chargesAmount  Int            @default(0)
+  depositAmount  Int            @default(0)
+  bedrooms       Int?
+  bathrooms      Int?
+  areaSqm        Int?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  owner        Owner        @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+
+  units     Unit[]
+  leases    Lease[]
+  expenses  Expense[]
+  documents Document[]
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, status])
+  @@index([ownerId])
+}
+
+/// Logement / chambre rattaché à un bien (immeuble, villa multi-lots, résidence…)
+model Unit {
+  id             String     @id @default(cuid())
+  organizationId String
+  propertyId     String
+  name           String
+  reference      String?
+  floor          Int?
+  rentAmount     Int?
+  chargesAmount  Int?
+  depositAmount  Int?
+  status         UnitStatus @default(LIBRE)
+  bedrooms       Int?
+  bathrooms      Int?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  property     Property     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  leases Lease[]
+
+  @@unique([propertyId, name])
+  @@index([organizationId, status])
+}
+
+// -------------------------------- LOCATAIRES -------------------------------
+
+model Tenant {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  userId                String?  @unique
+  firstName             String
+  lastName              String
+  phone                 String
+  email                 String?
+  idType                String?
+  idNumber              String?
+  idDocumentUrl         String?
+  profession            String?
+  employer              String?
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  guarantorName         String?
+  guarantorPhone        String?
+  guarantorIdNumber     String?
+  notes                 String?
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  leases     Lease[]
+  payments   Payment[]
+  receipts   Receipt[]
+  documents  Document[]
+
+  @@index([organizationId])
+  @@index([organizationId, phone])
+}
+
+// ------------------------------ CONTRATS DE BAIL ---------------------------
+
+model Lease {
+  id                 String          @id @default(cuid())
+  organizationId     String
+  propertyId         String
+  unitId             String?
+  tenantId           String
+  ownerId            String
+  reference          String
+  startDate          DateTime
+  endDate            DateTime
+  rentAmount         Int
+  chargesAmount      Int             @default(0)
+  depositAmount      Int             @default(0)
+  advanceMonths      Int             @default(0)
+  periodicity        RentPeriodicity @default(MENSUEL)
+  status             LeaseStatus     @default(ACTIF)
+  signedAt           DateTime?
+  terminationDate    DateTime?
+  terminationReason  String?
+  noticePeriodDays   Int             @default(30)
+  /// Surcharge du taux de pénalité de retard (% / mois)
+  penaltyRatePercent Float?
+  notes              String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  property     Property     @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  unit         Unit?        @relation(fields: [unitId], references: [id], onDelete: SetNull)
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  owner        Owner        @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+
+  rentSchedules RentSchedule[]
+  payments      Payment[]
+  receipts      Receipt[]
+  documents     Document[]
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, status])
+  @@index([tenantId])
+}
+
+/// Échéance de loyer générée automatiquement à partir du contrat.
+model RentSchedule {
+  id             String     @id @default(cuid())
+  organizationId String
+  leaseId        String
+  periodStart    DateTime
+  dueDate        DateTime
+  periodLabel    String
+  rentDue        Int
+  chargesDue     Int        @default(0)
+  penaltyAmount  Int        @default(0)
+  amountPaid     Int        @default(0)
+  status         RentStatus @default(A_VENIR)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lease        Lease        @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+
+  payments  Payment[]
+  reminders Reminder[]
+
+  @@unique([leaseId, periodStart])
+  @@index([organizationId, status, dueDate])
+}
+
+// --------------------------------- PAIEMENTS -------------------------------
+
+model Payment {
+  id             String        @id @default(cuid())
+  organizationId String
+  leaseId        String
+  rentScheduleId String?
+  tenantId       String?
+  amount         Int
+  method         PaymentMethod
+  reference      String?
+  paidAt         DateTime
+  proofUrl       String?
+  proofName      String?
+  status         PaymentStatus @default(VALIDE)
+  recordedById   String?
+  cancelledAt    DateTime?
+  cancelReason   String?
+  notes          String?
+  createdAt      DateTime      @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lease        Lease        @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+  rentSchedule RentSchedule? @relation(fields: [rentScheduleId], references: [id], onDelete: SetNull)
+  tenant       Tenant?      @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  recordedBy   User?        @relation("PaymentRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
+  receipt      Receipt?
+
+  @@index([organizationId, paidAt])
+  @@index([rentScheduleId])
+}
+
+/// Quittance numérotée séquentiellement par organisation (QUI-2026-0001).
+model Receipt {
+  id             String    @id @default(cuid())
+  organizationId String
+  number         String
+  paymentId      String?   @unique
+  leaseId        String
+  tenantId       String
+  periodLabel    String
+  amountPaid     Int
+  chargesPaid    Int       @default(0)
+  balanceDue     Int       @default(0)
+  issuedAt       DateTime  @default(now())
+  issuedById     String?
+  channel        String?
+  sentAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  payment      Payment?     @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  lease        Lease        @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  issuedBy     User?        @relation(fields: [issuedById], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, number])
+  @@index([organizationId, issuedAt])
+}
+
+// --------------------------------- RELANCES --------------------------------
+
+model Reminder {
+  id             String          @id @default(cuid())
+  organizationId String
+  rentScheduleId String
+  channel        ReminderChannel
+  status         ReminderStatus  @default(A_ENVOYER)
+  offsetDays     Int             @default(0)
+  message        String
+  sentAt         DateTime?
+  createdById    String?
+  createdAt      DateTime        @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rentSchedule RentSchedule @relation(fields: [rentScheduleId], references: [id], onDelete: Cascade)
+  createdBy    User?        @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([rentScheduleId, channel, offsetDays])
+  @@index([organizationId, status])
+}
+
+// --------------------------------- DÉPENSES --------------------------------
+
+model Expense {
+  id             String          @id @default(cuid())
+  organizationId String
+  propertyId     String?
+  ownerId        String?
+  category       ExpenseCategory
+  label          String
+  amount         Int
+  date           DateTime
+  supplier       String?
+  receiptUrl     String?
+  notes          String?
+  createdAt      DateTime        @default(now())
+  createdById    String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  property     Property?    @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  owner        Owner?       @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, date])
+}
+
+// -------------------------------- DOCUMENTS --------------------------------
+
+model Document {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  type           DocumentType
+  url            String
+  mimeType       String?
+  size           Int?
+  propertyId     String?
+  tenantId       String?
+  leaseId        String?
+  ownerId        String?
+  uploadedById   String?
+  createdAt      DateTime     @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  property     Property?    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenant       Tenant?      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lease        Lease?       @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+  owner        Owner?       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+// ------------------------------ JOURNAL D'ACTIVITÉ -------------------------
+
+model ActivityLog {
+  id             String   @id @default(cuid())
+  organizationId String?
+  actorId        String?
+  actorName      String
+  action         String
+  entityType     String
+  entityId       String?
+  description    String?
+  metadata       Json?
+  ipAddress      String?
+  createdAt      DateTime @default(now())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+}
