@@ -7,7 +7,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
   return (
     <div className="flex min-h-dvh flex-col bg-muted/30">
       <header className="flex items-center justify-between px-5 py-4">
-        <Link href="/" className="flex items-center gap-2 font-semibold">
+        <Link href="/connexion" className="flex items-center gap-2 font-semibold">
           <span className="rounded-lg bg-primary p-1.5 text-primary-foreground">
             <Building2 className="size-4" />
           </span>
