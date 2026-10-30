@@ -11,11 +11,33 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { apiRequest } from '@/lib/api-client';
 
-export function LoginForm() {
+export function LoginForm({ initialError }: { initialError?: string } = {}) {
   const router = useRouter();
   const [tab, setTab] = React.useState('email');
   const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(initialError ?? null);
+  // Le navigateur a-t-il accepté le cookie de session ? (aperçu en iframe)
+  const [cookieBlocked, setCookieBlocked] = React.useState(false);
+
+  /**
+   * Si le cookie témoin n'est pas lisible, c'est que le navigateur a refusé le
+   * cookie de session (cookies tiers bloqués dans l'iframe d'aperçu). On ne
+   * navigue pas : on affiche une issue de secours à l'utilisateur.
+   */
+  function finishLogin(redirect: string) {
+    const accepted = document.cookie
+      .split(';')
+      .some((cookie) => cookie.trim().startsWith('ml_session_ok='));
+
+    if (!accepted) {
+      setCookieBlocked(true);
+      setLoading(false);
+      return;
+    }
+    setCookieBlocked(false);
+    router.push(redirect);
+    router.refresh();
+  }
 
   // Connexion e-mail
   const [email, setEmail] = React.useState('admin@monloyer.ci');
@@ -37,8 +59,7 @@ export function LoginForm() {
         body: JSON.stringify({ email, password }),
       });
       toast.success('Connexion réussie');
-      router.push(result.redirect);
-      router.refresh();
+      finishLogin(result.redirect);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Connexion impossible.');
     } finally {
@@ -80,8 +101,7 @@ export function LoginForm() {
         body: JSON.stringify({ phone, code }),
       });
       toast.success('Connexion réussie');
-      router.push(result.redirect);
-      router.refresh();
+      finishLogin(result.redirect);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Code invalide.');
     } finally {
@@ -102,10 +122,16 @@ export function LoginForm() {
         </TabsList>
 
         <TabsContent value="email">
-          <form onSubmit={handlePasswordLogin} className="space-y-4">
+          <form
+            onSubmit={handlePasswordLogin}
+            action="/api/auth/login"
+            method="post"
+            className="space-y-4"
+          >
             <Field label="Adresse e-mail" htmlFor="email" required>
               <Input
                 id="email"
+                name="email"
                 type="email"
                 autoComplete="email"
                 required
@@ -117,6 +143,7 @@ export function LoginForm() {
             <Field label="Mot de passe" htmlFor="password" required>
               <Input
                 id="password"
+                name="password"
                 type="password"
                 autoComplete="current-password"
                 required
@@ -128,6 +155,26 @@ export function LoginForm() {
               <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 {error}
               </p>
+            ) : null}
+            {cookieBlocked ? (
+              <div
+                role="alert"
+                className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+              >
+                <p className="font-medium">Votre navigateur bloque les cookies de cet aperçu.</p>
+                <p className="text-muted-foreground">
+                  La connexion a réussi, mais la session ne peut pas être conservée dans un cadre
+                  intégré. Ouvrez l&apos;application dans un onglet dédié, puis connectez-vous à
+                  nouveau.
+                </p>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => window.open(`${window.location.origin}/connexion`, '_blank', 'noopener')}
+                >
+                  Ouvrir dans un nouvel onglet
+                </Button>
+              </div>
             ) : null}
             <Button type="submit" className="w-full" loading={loading}>
               <KeyRound className="size-4" /> Se connecter

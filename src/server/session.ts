@@ -6,7 +6,35 @@ import { prisma } from '@/server/db';
 import { can, isStaff, type Permission } from '@/lib/permissions';
 
 export const SESSION_COOKIE = 'ml_session';
+/** Cookie miroir non httpOnly : sert uniquement à détecter un blocage navigateur. */
+export const SESSION_MARKER_COOKIE = 'ml_session_ok';
 const SESSION_DURATION_DAYS = 30;
+
+/**
+ * Attributs du cookie de session, choisis pour fonctionner partout :
+ *
+ * - Hébergement réel (Vercel, aperçu E2B servi en HTTPS, souvent dans une
+ *   iframe d'un autre domaine) : `Secure` + `SameSite=None` + `Partitioned`.
+ *   Sans cela, le navigateur n'envoie pas le cookie dans l'iframe et
+ *   l'utilisateur retombe indéfiniment sur l'écran de connexion.
+ * - Développement local en HTTP (`npm run dev` sur localhost) : `Lax` sans
+ *   `Secure`, sinon le navigateur refuserait le cookie.
+ */
+async function sessionCookieOptions(expiresAt: Date) {
+  const requestHeaders = await headers();
+  const host = (requestHeaders.get('host') ?? '').split(':')[0];
+  const forwardedProto = requestHeaders.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const isLocalHttp =
+    (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') && forwardedProto !== 'https';
+
+  return {
+    path: '/',
+    expires: expiresAt,
+    ...(isLocalHttp
+      ? { secure: false, sameSite: 'lax' as const }
+      : { secure: true, sameSite: 'none' as const, partitioned: true }),
+  };
+}
 
 export type SessionUser = {
   id: string;
@@ -44,22 +72,13 @@ export async function createSession(userId: string): Promise<string> {
   });
 
   const cookieStore = await cookies();
-  const requestHeaders = await headers();
-  const forwardedProto = requestHeaders.get('x-forwarded-proto')?.split(',')[0]?.trim();
-  const isHttps = forwardedProto === 'https';
-  // En préview intégrée (iframe d'un autre domaine), le cookie doit être
-  // SameSite=None + Partitioned pour être transmis ; sinon on garde Lax (CSRF).
-  const isCrossSite = requestHeaders.get('sec-fetch-site') === 'cross-site';
+  const options = await sessionCookieOptions(expiresAt);
 
-  cookieStore.set(SESSION_COOKIE, token, {
-    httpOnly: true,
-    // `Secure` uniquement si la requête arrive réellement en HTTPS
-    secure: isHttps,
-    sameSite: isCrossSite && isHttps ? 'none' : 'lax',
-    partitioned: isCrossSite && isHttps,
-    path: '/',
-    expires: expiresAt,
-  });
+  // Cookie httpOnly : c'est lui qui porte la session.
+  cookieStore.set(SESSION_COOKIE, token, { ...options, httpOnly: true });
+  // Témoin lisible par le navigateur : permet au formulaire de détecter un
+  // blocage des cookies (aperçu en iframe) et de proposer une solution.
+  cookieStore.set(SESSION_MARKER_COOKIE, '1', { ...options, httpOnly: false });
 
   return token;
 }
@@ -76,6 +95,7 @@ export async function destroySession(): Promise<void> {
   }
 
   cookieStore.delete(SESSION_COOKIE);
+  cookieStore.delete(SESSION_MARKER_COOKIE);
 }
 
 /** Utilisateur courant (ou null) — la session est vérifiée côté serveur à chaque appel. */
@@ -110,7 +130,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 /** Garde-fou pour les pages protégées. */
 export async function requireUser(): Promise<SessionUser> {
   const user = await getCurrentUser();
-  if (!user) redirect('/connexion');
+  if (!user) redirect('/connexion?erreur=session');
   return user;
 }
 
@@ -136,7 +156,7 @@ export async function requirePermission(permission: Permission): Promise<Session
 
 export async function requireOrganization(): Promise<SessionUser & { organizationId: string }> {
   const user = await requireUser();
-  if (!user.organizationId) redirect('/connexion');
+  if (!user.organizationId) redirect('/connexion?erreur=session');
   return user as SessionUser & { organizationId: string };
 }
 

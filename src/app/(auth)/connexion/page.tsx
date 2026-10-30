@@ -7,9 +7,22 @@ import { getCurrentUser, homePathForRole } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Connexion' };
 
-export default async function LoginPage() {
+const SESSION_HINTS: Record<string, string> = {
+  session:
+    'Votre session a expiré ou n\'a pas pu être enregistrée. Reconnectez-vous ; si vous venez de le faire, ouvrez l\'application dans un onglet dédié (les cookies sont parfois bloqués dans un aperçu intégré).',
+};
+
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ erreur?: string }>;
+}) {
   const user = await getCurrentUser();
   if (user) redirect(homePathForRole(user.role));
+
+  const { erreur } = await searchParams;
+  // Message affiché côté serveur : visible même si le JavaScript ne s'exécute pas.
+  const initialError = erreur ? SESSION_HINTS[erreur] ?? decodeURIComponent(erreur) : undefined;
 
   return (
     <Card>
@@ -20,7 +33,7 @@ export default async function LoginPage() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <LoginForm />
+        <LoginForm initialError={initialError} />
         <p className="text-center text-sm text-muted-foreground">
           Pas encore de compte ?{' '}
           <Link href="/inscription" className="font-medium text-primary underline-offset-4 hover:underline">
