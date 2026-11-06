@@ -100,6 +100,7 @@ Connexion par téléphone : utilisez l'un des numéros du seed (ex. `07 08 11 22
 | `CRON_SECRET` | oui en prod | Protège `/api/cron/relances` (Vercel Cron envoie `Authorization: Bearer $CRON_SECRET`) |
 | `OTP_DEBUG_CODE` | non | `true` en local : renvoie le code OTP dans la réponse API |
 | `SMS_PROVIDER_API_KEY` | non | Emplacement prévu pour un fournisseur SMS/WhatsApp |
+| `PREVIEW_DIAGNOSTICS` | non | `1` : trace chaque requête (hôte, protocole, cookies) dans la console — voir Dépannage |
 
 ---
 
@@ -120,6 +121,7 @@ Connexion par téléphone : utilisez l'un des numéros du seed (ex. `07 08 11 22
 ```
 src/
 ├── app/
+│   ├── page.tsx                # racine : redirige vers /connexion ou l'espace du rôle
 │   ├── (auth)/                 # connexion, inscription, invitation
 │   ├── (app)/                  # espace connecté (sidebar desktop + barre mobile)
 │   │   ├── tableau-de-bord/    # KPI agence
@@ -162,7 +164,9 @@ scripts/
 
 - Chaque table métier porte un `organizationId` ; **toutes** les requêtes serveur filtrent sur l'organisation issue de la session (aucun `organizationId` n'est accepté depuis le client).
 - Les permissions sont vérifiées **côté serveur** (`requirePermission`, `requireApiUser(permission)`), pas seulement dans l'interface.
-- Sessions : jeton aléatoire 256 bits, stocké **haché** (SHA-256) en base, cookie `httpOnly` + `secure` en production, révocation à la déconnexion, expiration 30 jours.
+- Sessions : jeton aléatoire 256 bits, stocké **haché** (SHA-256) en base, cookie `httpOnly`, révocation à la déconnexion, expiration 30 jours.
+- Attributs du cookie choisis automatiquement : `Secure; SameSite=None; Partitioned` pour tout hôte non-localhost (nécessaire derrière un proxy HTTPS et dans un aperçu en iframe), `Lax` sans `Secure` uniquement pour `npm run dev` en HTTP sur localhost.
+- Le formulaire de connexion fonctionne **sans JavaScript** (soumission HTML native → `303` + cookie) et détecte un blocage des cookies pour proposer l'ouverture dans un onglet dédié.
 - Mots de passe : bcrypt (10 rounds). OTP : code à 6 chiffres haché, 10 minutes, 5 tentatives max, 3 demandes / 10 minutes.
 - Journal d'activité horodaté pour les actions sensibles (paiements, annulations, résiliations, envois).
 
@@ -186,7 +190,50 @@ scripts/
 
 ---
 
-## 8. Limites connues du MVP & pistes
+## 8. Dépannage
+
+### « Je me connecte mais je retombe sur l'écran de connexion »
+
+La session repose sur un cookie. Derrière un proxy ou dans un aperçu affiché en
+iframe (cookies tiers), il doit être émis en `SameSite=None; Secure; Partitioned`.
+C'est le cas par défaut pour tout hôte autre que `localhost` — y compris quand le
+proxy annonce `x-forwarded-proto: http` alors que le navigateur est en HTTPS.
+Si le blocage vient du navigateur (Safari, réglages stricts), le formulaire
+affiche un encadré avec le bouton **« Ouvrir dans un nouvel onglet »** : la
+connexion fonctionne alors en contexte de premier niveau.
+
+Pour diagnostiquer, activez le journal :
+
+```bash
+# .env
+PREVIEW_DIAGNOSTICS="1"
+```
+
+Chaque requête est alors tracée dans la console du serveur avec l'hôte, le
+protocole vu par l'application, le contexte de navigation et **les cookies
+réellement transmis** :
+
+```
+[diag] GET /tableau-de-bord | host=3000-xxxx.e2b.app | proto=http | cookies=ml_session,ml_session_ok
+```
+
+Aucun cookie dans la ligne ⇒ le navigateur ne les renvoie pas (politique de
+cookies), pas un problème d'identifiants.
+
+### La base de démonstration a disparu
+
+Elle vit dans le dossier `.pglite/`, ignoré par git. Après une remise à zéro de
+l'environnement, relancez simplement :
+
+```bash
+npm install && node scripts/offline-prisma-generate.mjs   # si node_modules absent
+npm run db:local:reset   # migration + seed de démonstration
+npm run build && npm start
+```
+
+---
+
+## 9. Limites connues du MVP & pistes
 
 - **Stockage des fichiers** : photos et justificatifs sont stockés en base64 dans le MVP ; passer à Vercel Blob / S3 en production.
 - **Envoi réel des relances** : WhatsApp/SMS sont ouverts via `wa.me` / `sms:` (ou e-mail via `mailto:`), avec traçage de l'envoi. Brancher Twilio / Orange SMS API dans `requestPhoneOtp` et `markReminderSent`.
