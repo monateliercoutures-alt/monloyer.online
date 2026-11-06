@@ -44,6 +44,19 @@ export async function generateReminders(
   let created = 0;
   let skipped = 0;
 
+  // Relances déjà programmées : on les écarte en amont pour rester idempotent
+  // sans provoquer d'erreur de contrainte unique dans les logs.
+  const existing = await prisma.reminder.findMany({
+    where: {
+      organizationId,
+      rentScheduleId: { in: schedules.map((schedule) => schedule.id) },
+    },
+    select: { rentScheduleId: true, channel: true, offsetDays: true },
+  });
+  const alreadyPlanned = new Set(
+    existing.map((reminder) => `${reminder.rentScheduleId}|${reminder.channel}|${reminder.offsetDays}`),
+  );
+
   for (const schedule of schedules) {
     const base = schedule.rentDue + schedule.chargesDue;
     const balance = Math.max(0, base + schedule.penaltyAmount - schedule.amountPaid);
@@ -69,6 +82,12 @@ export async function generateReminders(
       });
 
       for (const channel of channels) {
+        const key = `${schedule.id}|${channel}|${offset}`;
+        if (alreadyPlanned.has(key)) {
+          skipped += 1;
+          continue;
+        }
+
         try {
           await prisma.reminder.create({
             data: {
@@ -81,6 +100,7 @@ export async function generateReminders(
               createdById: options.createdById ?? null,
             },
           });
+          alreadyPlanned.add(key);
           created += 1;
         } catch {
           // Doublon : relance déjà programmée pour cette échéance/canal/décalage
